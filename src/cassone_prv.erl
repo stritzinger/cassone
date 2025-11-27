@@ -73,8 +73,8 @@ assemble_for_current_machine(#{cassone_dir := CassoneDir} = Options) ->
     copy_released_files(Options),
     copy_binaries(Options),
     copy_erts_and_libs(Options),
-    {ok, Cwd} = file:get_cwd(),
-    tar("cassone", CassoneDir).
+    tar("cassone", CassoneDir),
+    write_metadata("recipy",Options).
 
 copy_released_files(#{
     mode := escript,
@@ -144,3 +144,17 @@ tar(Name, Dir) ->
     rebar_api:info("cassone: creating tar file ~p in ~p", [Name, BaseName]),
     ok = erl_tar:create(TarFilename, [BaseName], [compressed]),
     file:set_cwd(BackupCwd).
+
+write_metadata(Name, Options) ->
+    Filename =  Name ++ ".cbor",
+    rebar_api:info("cassone: writing metadata to ~p", [Filename]),
+    Metadata = metadata(Options),
+    Binary = ecbor:encode(Metadata),
+    ok = file:write_file(Filename, Binary).
+
+
+metadata(#{mode := escript, escript_name := EscriptName} = Options) ->
+    #{
+        executable => "bin/" ++ EscriptName,
+        args => "bin/" ++ EscriptName
+    }.
