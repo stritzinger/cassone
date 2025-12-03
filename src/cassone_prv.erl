@@ -26,26 +26,19 @@ init(State) ->
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
 do(State) ->
     BinDir = filename:join(rebar_dir:base_dir(State), "bin"),
-    CassoneDir = filename:join(rebar_dir:base_dir(State), "cassone"),
+    WorkingDir = filename:join(rebar_dir:base_dir(State), "cassone"),
     ok = filelib:ensure_path(BinDir),
-    ok = filelib:ensure_path(CassoneDir),
+    ok = filelib:ensure_path(WorkingDir),
     Config = rebar_state:get(State, cassone, []),
     Mode = get_option(mode, Config, release),
-
     Targets = get_option(targets, Config, [current_machine]),
-    {ok, State1} = case Mode of
-        escript ->
-            rebar_prv_escriptize:do(State);
-        release ->
-            rebar_api:abort("cassone: release mode is not supported yet", [])
-    end,
-    Options = #{
+    Opts = #{
         mode => Mode,
-        escript_name => rebar_state:get(State, escript_name),
         bin_dir => BinDir,
-        cassone_dir => CassoneDir
+        working_dir => WorkingDir
     },
-    [assemble_target(TGT,Options) || TGT <- Targets],
+    {Opts2, State1} = release(Mode, Opts, State),
+    [assemble_target(TGT, Opts2) || TGT <- Targets],
     {ok, State1}.
 
 -spec format_error(any()) ->  iolist().
@@ -54,68 +47,92 @@ format_error(Reason) ->
 
 %% Internal functions ----------------------------------------------------------
 
+release(escript, Opts, State) ->
+    {ok, S} = rebar_prv_escriptize:do(State),
+    EscriptName = rebar_state:get(State, escript_name),
+    {Opts#{escript_name => atom_to_list(EscriptName)}, S};
+release(release, Opts, State) ->
+    rebar_api:abort("cassone: release mode is not supported yet", []).
+
 get_option(Option, Config, Default) ->
     case lists:keyfind(Option, 1, Config) of
         {Option, Value} -> Value;
         false -> Default
     end.
 
-assemble_target(Target, Options) ->
-    case Target of
-        current_machine ->
-            assemble_for_current_machine(Options);
-        _ ->
-            rebar_api:warning("cassone: unsupported target: ~p", [Target])
-    end.
-
-assemble_for_current_machine(#{cassone_dir := CassoneDir} = Options) ->
-    rebar_api:info("cassone: assembling current machine", []),
+assemble_target(current_machine, Options) ->
+    assemble_for_current_machine(Options);
+assemble_target({OS, Arch},
+               #{working_dir := WorkingDir,
+                 escript_name := EscriptName} = Options) ->
+    OtpVersion = otp_version(),
+    TargetOTPBuildDir = cassone_erts:fetch(OtpVersion, Arch, OS),
     copy_released_files(Options),
-    copy_binaries(Options),
-    copy_erts_and_libs(Options),
-    tar("cassone", CassoneDir),
-    write_metadata("recipy",Options).
+    copy_erlang_binaries(TargetOTPBuildDir, Options),
+    copy_erts_and_libs(TargetOTPBuildDir, Options);
+assemble_target(Target, Options) ->
+    rebar_api:warning("cassone: unsupported target: ~p", [Target]).
+
+assemble_for_current_machine(#{working_dir := WorkingDir,
+                               escript_name := EscriptName} = Options) ->
+    rebar_api:info("cassone: assembling current machine", []),
+    LocalErlangReleaseDir = code:root_dir(),
+    copy_released_files(Options),
+    copy_erlang_binaries(LocalErlangReleaseDir, Options),
+    copy_erts_and_libs(LocalErlangReleaseDir, Options),
+    EscriptInstallationDir = filename:join([WorkingDir, EscriptName]),
+    tar(EscriptName, EscriptInstallationDir),
+    TarFilename = filename:join([WorkingDir, EscriptName ++ ".tar.gz"]),
+    {ok, TarBin} = file:read_file(TarFilename),
+    MetadataBin = encode_metadata(Options),
+    FooterBin =
+        <<
+            "FOOTER",
+            (byte_size(TarBin)):64/unsigned-little,
+            (byte_size(MetadataBin)):64/unsigned-little
+        >>,
+    FinalBinary = <<TarBin/binary, MetadataBin/binary, FooterBin/binary>>,
+    TmpTailFile = filename:join(WorkingDir, EscriptName ++ ".tail"),
+    ok = file:write_file(TmpTailFile, FinalBinary).
 
 copy_released_files(#{
     mode := escript,
-    cassone_dir := CassoneDir,
+    working_dir := WorkingDir,
     bin_dir := BinDir,
     escript_name := EscriptName
 }) ->
     rebar_api:info("cassone: copying released files", []),
     RelEscriptLocation = filename:join([BinDir, EscriptName]),
-    RelEscriptDst = filename:join([CassoneDir, "bin", EscriptName]),
+    RelEscriptDst = filename:join([WorkingDir, EscriptName, "bin", EscriptName]),
     filelib:ensure_dir(RelEscriptDst),
     cp_cmd(RelEscriptLocation, RelEscriptDst).
 
-copy_binaries(#{
+copy_erlang_binaries(TargetOTPInstallation, #{
     mode := escript,
-    cassone_dir := CassoneDir,
+    working_dir := WorkingDir,
     bin_dir := BinDir,
     escript_name := EscriptName
 }) ->
     rebar_api:info("cassone: copying binaries", []),
-
-    LocalErlangReleaseDir = code:root_dir(),
-    LocalEscriptBin = filename:join([LocalErlangReleaseDir, "bin", "escript"]),
-    CassoneEscriptBin = filename:join([CassoneDir, "bin", "escript"]),
+    LocalEscriptBin = filename:join([TargetOTPInstallation, "bin", "escript"]),
+    CassoneEscriptBin = filename:join([WorkingDir, EscriptName, "bin", "escript"]),
     filelib:ensure_dir(CassoneEscriptBin),
     cp_cmd(LocalEscriptBin, CassoneEscriptBin).
 
-copy_erts_and_libs(#{
+copy_erts_and_libs(TargetOTPInstallation,#{
     mode := escript,
-    cassone_dir := CassoneDir,
+    working_dir := WorkingDir,
     bin_dir := BinDir,
     escript_name := EscriptName
 }) ->
     rebar_api:info("cassone: copying erts and libs", []),
-    LocalErlangReleaseDir = code:root_dir(),
-    ErtsVsn = get_erts_version(LocalErlangReleaseDir),
-    ErtsFolder = <<"erts-", ErtsVsn/binary>>,
-    LocalErlangErts = filename:join([LocalErlangReleaseDir, ErtsFolder]),
-    cp_cmd(LocalErlangErts, CassoneDir),
-    LibDir = filename:join([LocalErlangReleaseDir, "lib"]),
-    cp_cmd(LibDir, CassoneDir),
+    %%ErtsVsn = get_erts_version(TargetOTPInstallation),
+    ErtsWildcard = "erts-*",
+    LocalErlangErts = filename:join([TargetOTPInstallation, ErtsWildcard]),
+    [ErtsFolder | _] = filelib:wildcard(LocalErlangErts),
+    cp_cmd(ErtsFolder, filename:join([WorkingDir, EscriptName])),
+    LibDir = filename:join([TargetOTPInstallation, "lib"]),
+    cp_cmd(LibDir, filename:join([WorkingDir, EscriptName])),
     ok.
 
 
@@ -138,19 +155,17 @@ get_erts_version(LocalErlangReleaseDir) ->
 
 tar(Name, Dir) ->
     {ok, BackupCwd} = file:get_cwd(),
-    TarFilename = filename:join([BackupCwd, Name ++ ".tar.gz"]),
+    DirName = filename:dirname(Dir),
+    TarFilename = filename:join([DirName, Name ++ ".tar.gz"]),
     BaseName = filename:basename(Dir),
-    file:set_cwd(filename:dirname(Dir)),
+    file:set_cwd(DirName),
     rebar_api:info("cassone: creating tar file ~p in ~p", [Name, BaseName]),
     ok = erl_tar:create(TarFilename, [BaseName], [compressed]),
     file:set_cwd(BackupCwd).
 
-write_metadata(Name, Options) ->
-    Filename =  Name ++ ".cbor",
-    rebar_api:info("cassone: writing metadata to ~p", [Filename]),
+encode_metadata(Options) ->
     Metadata = metadata(Options),
-    Binary = ecbor:encode(Metadata),
-    ok = file:write_file(Filename, Binary).
+    ecbor:encode(Metadata).
 
 
 metadata(#{mode := escript, escript_name := EscriptName} = Options) ->
@@ -158,3 +173,10 @@ metadata(#{mode := escript, escript_name := EscriptName} = Options) ->
         executable => "bin/" ++ EscriptName,
         args => "bin/" ++ EscriptName
     }.
+
+
+otp_version() ->
+    Root = code:root_dir(),
+    Major = erlang:system_info(otp_release),
+    {ok, Version} = file:read_file(filename:join([Root, "releases", Major, "OTP_VERSION"])),
+    string:trim(binary_to_list(Version)).
