@@ -27,7 +27,7 @@ init(State) ->
 do(State) ->
     BinDir = filename:join(rebar_dir:base_dir(State), "bin"),
     WorkingDir = filename:join(rebar_dir:base_dir(State), "cassone"),
-    os:cmd(io_lib:format("rm -rf ~s", [WorkingDir])),
+    rebar_utils:sh(io_lib:format("rm -rf ~s", [WorkingDir]), []),
     ok = filelib:ensure_path(BinDir),
     ok = filelib:ensure_path(WorkingDir),
     Config = rebar_state:get(State, cassone, []),
@@ -39,7 +39,12 @@ do(State) ->
         working_dir => WorkingDir
     },
     {Opts2, State1} = release(Mode, Opts, State),
-    [assemble_target(TGT, Opts2) || TGT <- Targets],
+    prepare_piadina(WorkingDir),
+    [begin
+        cleanup_working_dir(Opts2),
+        assemble_target(TGT, Opts2)
+    end
+    || TGT <- Targets],
     {ok, State1}.
 
 -spec format_error(any()) ->  iolist().
@@ -61,16 +66,27 @@ get_option(Option, Config, Default) ->
         false -> Default
     end.
 
+cleanup_working_dir(#{working_dir := WorkingDir, escript_name := EscriptName}) ->
+    rebar_api:info("cassone: cleaning up working directory", []),
+    ReleaseDir = filename:join([WorkingDir, EscriptName]),
+    rebar_utils:sh(io_lib:format("rm -rf ~s", [ReleaseDir]), []),
+    rebar_api:info("cassone: cleanup piadina repository", []),
+    PiadinaDir = filename:join([WorkingDir, "piadina"]),
+    rebar_utils:sh("cd " ++ PiadinaDir ++ " && git clean -fdx", []),
+    ok.
+
 assemble_target(current_machine, Options) ->
     rebar_api:info("cassone: assembling current machine", []),
     LocalErlangReleaseDir = code:root_dir(),
     copy_released_files(Options),
-    copy_erts_and_libs(LocalErlangReleaseDir, Options);
+    copy_erts_and_libs(LocalErlangReleaseDir, Options),
+    build_piadina(Options);
 assemble_target({OS, Arch}, Options) ->
     OtpVersion = otp_version(),
     TargetOTPBuildDir = cassone_erts:fetch(OtpVersion, Arch, OS),
     copy_released_files(Options),
-    copy_erts_and_libs(TargetOTPBuildDir, Options);
+    copy_erts_and_libs(TargetOTPBuildDir, Options),
+    build_piadina(Options);
 assemble_target(Target, Options) ->
     rebar_api:warning("cassone: unsupported target: ~p", [Target]).
 
@@ -108,7 +124,7 @@ cp_cmd(Src, Dst) ->
         false ->
             Flags = ""
     end,
-    os:cmd(io_lib:format("cp ~s ~s ~s", [Flags, Src, Dst])).
+    rebar_utils:sh(io_lib:format("cp ~s ~s ~s", [Flags, Src, Dst]), []).
 
 get_erts_version(LocalErlangReleaseDir) ->
     StartErlData = filename:join([LocalErlangReleaseDir, "releases", "start_erl.data"]),
@@ -121,3 +137,21 @@ otp_version() ->
     Major = erlang:system_info(otp_release),
     {ok, Version} = file:read_file(filename:join([Root, "releases", Major, "OTP_VERSION"])),
     string:trim(binary_to_list(Version)).
+
+prepare_piadina(WorkingDir) ->
+    rebar_api:info("cassone: preparing piadina", []),
+    GitResource = {git, "https://github.com/stritzinger/piadina.git", {branch, "main"}},
+    PiadinaDir = filename:join([WorkingDir, "piadina"]),
+    case filelib:is_dir(PiadinaDir) of
+        false -> rebar_git_resource:download(PiadinaDir, GitResource, []);
+        true -> ok
+    end.
+
+build_piadina(#{working_dir := WorkingDir}) ->
+    rebar_api:info("cassone: building piadina", []),
+    PiadinaDir = filename:join([WorkingDir, "piadina"]),
+    Opts = [{cd, PiadinaDir}],
+    rebar_utils:sh("./autogen.sh", Opts),
+    rebar_utils:sh("./configure ", Opts),
+    rebar_utils:sh("make", Opts),
+    ok.
