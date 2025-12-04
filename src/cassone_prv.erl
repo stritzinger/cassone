@@ -79,21 +79,7 @@ assemble_for_current_machine(#{working_dir := WorkingDir,
     LocalErlangReleaseDir = code:root_dir(),
     copy_released_files(Options),
     copy_erlang_binaries(LocalErlangReleaseDir, Options),
-    copy_erts_and_libs(LocalErlangReleaseDir, Options),
-    EscriptInstallationDir = filename:join([WorkingDir, EscriptName]),
-    tar(EscriptName, EscriptInstallationDir),
-    TarFilename = filename:join([WorkingDir, EscriptName ++ ".tar.gz"]),
-    {ok, TarBin} = file:read_file(TarFilename),
-    MetadataBin = encode_metadata(Options),
-    FooterBin =
-        <<
-            "FOOTER",
-            (byte_size(TarBin)):64/unsigned-little,
-            (byte_size(MetadataBin)):64/unsigned-little
-        >>,
-    FinalBinary = <<TarBin/binary, MetadataBin/binary, FooterBin/binary>>,
-    TmpTailFile = filename:join(WorkingDir, EscriptName ++ ".tail"),
-    ok = file:write_file(TmpTailFile, FinalBinary).
+    copy_erts_and_libs(LocalErlangReleaseDir, Options).
 
 copy_released_files(#{
     mode := escript,
@@ -126,15 +112,11 @@ copy_erts_and_libs(TargetOTPInstallation,#{
     escript_name := EscriptName
 }) ->
     rebar_api:info("cassone: copying erts and libs", []),
-    %%ErtsVsn = get_erts_version(TargetOTPInstallation),
-    ErtsWildcard = "erts-*",
-    LocalErlangErts = filename:join([TargetOTPInstallation, ErtsWildcard]),
-    [ErtsFolder | _] = filelib:wildcard(LocalErlangErts),
+    [ErtsFolder | _] = filelib:wildcard("erts-*", TargetOTPInstallation),
     cp_cmd(ErtsFolder, filename:join([WorkingDir, EscriptName])),
     LibDir = filename:join([TargetOTPInstallation, "lib"]),
     cp_cmd(LibDir, filename:join([WorkingDir, EscriptName])),
     ok.
-
 
 cp_cmd(Src, Dst) ->
     rebar_api:info("cassone: copying ~p to ~p", [Src, Dst]),
@@ -146,34 +128,11 @@ cp_cmd(Src, Dst) ->
     end,
     os:cmd(io_lib:format("cp ~s ~s ~s", [Flags, Src, Dst])).
 
-
 get_erts_version(LocalErlangReleaseDir) ->
     StartErlData = filename:join([LocalErlangReleaseDir, "releases", "start_erl.data"]),
     {ok, Bin} = file:read_file(StartErlData),
     [ErtVersion, _] = binary:split(Bin, <<" ">>, [global]),
     ErtVersion.
-
-tar(Name, Dir) ->
-    {ok, BackupCwd} = file:get_cwd(),
-    DirName = filename:dirname(Dir),
-    TarFilename = filename:join([DirName, Name ++ ".tar.gz"]),
-    BaseName = filename:basename(Dir),
-    file:set_cwd(DirName),
-    rebar_api:info("cassone: creating tar file ~p in ~p", [Name, BaseName]),
-    ok = erl_tar:create(TarFilename, [BaseName], [compressed]),
-    file:set_cwd(BackupCwd).
-
-encode_metadata(Options) ->
-    Metadata = metadata(Options),
-    ecbor:encode(Metadata).
-
-
-metadata(#{mode := escript, escript_name := EscriptName} = Options) ->
-    #{
-        executable => "bin/" ++ EscriptName,
-        args => "bin/" ++ EscriptName
-    }.
-
 
 otp_version() ->
     Root = code:root_dir(),
