@@ -41,6 +41,7 @@ try_to_download(URL) ->
     end.
 
 download(URL) ->
+    {ok, _} = application:ensure_all_started(hackney),
     rebar_api:info("cassone_cache: downloading ~s", [URL]),
     Headers = [],
     Payload = <<>>,
