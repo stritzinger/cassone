@@ -25,6 +25,8 @@ init(State) ->
 
 -spec do(rebar_state:t()) -> {ok, rebar_state:t()} | {error, string()}.
 do(State) ->
+    [AppInfo] = rebar_state:project_apps(State),
+    Version = rebar_app_info:original_vsn(AppInfo),
     EscriptDir = filename:join(rebar_dir:base_dir(State), "bin"),
     CassoneDir = filename:join(rebar_dir:base_dir(State), "cassone"),
     rebar_utils:sh(io_lib:format("rm -rf ~s", [CassoneDir]), []),
@@ -34,6 +36,7 @@ do(State) ->
     Mode = get_option(mode, Config, release),
     Targets = get_option(targets, Config, [current_machine]),
     Opts = #{
+        version => Version,
         mode => Mode,
         escript_dir => EscriptDir,
         cassone_dir => CassoneDir
@@ -74,13 +77,25 @@ cleanup_working_dir(#{cassone_dir := CassoneDir, escript_name := EscriptName}) -
 assemble_target({OS, Arch}, Options) ->
     OtpVersion = otp_version(),
     TargetOTPDir = cassone_erts:fetch(OtpVersion, OS, Arch),
+    run_otp_install(TargetOTPDir),
     MuslcRuntime = cassone_musl:fetch(OS,Arch),
     {PiadinaPath, AzdoraPath} = cassone_piadina:fetch(OS, Arch),
+    rebar_utils:sh("chmod +x " ++ MuslcRuntime, []),
+    rebar_utils:sh("chmod +x " ++ AzdoraPath, []),
+    rebar_utils:sh("chmod +x " ++ PiadinaPath, []),
     copy_released_files(Options),
-    copy_erts_and_libs(TargetOTPDir, Options),
-    cook(AzdoraPath, PiadinaPath, Options);
+    copy_target_otp(TargetOTPDir, Options),
+    copy_musl_runtime(MuslcRuntime, Options),
+    MuslcRuntimeName = filename:basename(MuslcRuntime),
+    cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, Options);
 assemble_target(Target, _) ->
     rebar_api:warning("cassone: unsupported target: ~p", [Target]).
+
+run_otp_install(TargetOTPDir) ->
+    [InstallScript | _] = filelib:wildcard("*/Install", TargetOTPDir),
+    FullInstallScriptName = filename:join([TargetOTPDir, InstallScript]),
+    InstallDir = filename:dirname(FullInstallScriptName),
+    rebar_utils:sh(FullInstallScriptName ++ " -minimal " ++ InstallDir, []).
 
 copy_released_files(#{
     mode := escript,
@@ -94,19 +109,33 @@ copy_released_files(#{
     filelib:ensure_dir(RelEscriptDst),
     cp_cmd(RelEscriptLocation, RelEscriptDst).
 
-copy_erts_and_libs(TargetOTPDir, #{
+copy_target_otp(TargetOTPDir, #{
     mode := escript,
     cassone_dir := CassoneDir,
     escript_name := EscriptName
 }) ->
-    rebar_api:info("cassone: copying erts and libs from ~p to ~p", [TargetOTPDir, CassoneDir]),
+    PayloadLocation = filename:join([CassoneDir, EscriptName]),
+    rebar_api:info("cassone: copying erts, libs and binaries from ~p to ~p", [TargetOTPDir, PayloadLocation]),
     [ErtsFolder | _] = filelib:wildcard("*/erts-*", TargetOTPDir),
     ErtsFullPath = filename:join([TargetOTPDir, ErtsFolder]),
-    cp_cmd(ErtsFullPath, filename:join([CassoneDir, EscriptName])),
+    cp_cmd(ErtsFullPath, PayloadLocation),
     [LibFolder | _] = filelib:wildcard("*/lib", TargetOTPDir),
     LibDir = filename:join([TargetOTPDir, LibFolder]),
-    cp_cmd(LibDir, filename:join([CassoneDir, EscriptName])),
-    ok.
+    cp_cmd(LibDir, PayloadLocation),
+    [BinFolder | _] = filelib:wildcard("*/bin", TargetOTPDir),
+    BinDir = filename:join([TargetOTPDir, BinFolder]),
+    cp_cmd(BinDir, PayloadLocation),
+    % We replace epmd symlink with the real file to avoid an error from tar+gzip.
+    rebar_api:info("cassone: removing epmd symlink", []),
+    rebar_utils:sh("rm " ++ filename:join([PayloadLocation, "bin", "epmd"]), []).
+
+copy_musl_runtime(MuslcRuntime, #{
+    mode := escript,
+    cassone_dir := CassoneDir,
+    escript_name := EscriptName
+}) ->
+    rebar_api:info("cassone: copying musl runtime from ~p to ~p", [MuslcRuntime, CassoneDir]),
+    cp_cmd(MuslcRuntime, filename:join([CassoneDir, EscriptName])).
 
 cp_cmd(Src, Dst) ->
     rebar_api:info("cassone: copying ~p to ~p", [Src, Dst]),
@@ -124,6 +153,47 @@ otp_version() ->
     {ok, Version} = file:read_file(filename:join([Root, "releases", Major, "OTP_VERSION"])),
     string:trim(binary_to_list(Version)).
 
-cook(AzdoraPath, PiadinaPath, Options) ->
-    rebar_api:info("cassone: cooking", []),
-    ok.
+cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, #{mode := escript} = Options) ->
+    #{cassone_dir := CassoneDir,
+      escript_name := EscriptName,
+      version := Version
+    } = Options,
+    MUSL = filename:join(["{PAYLOAD_ROOT}", MuslcRuntimeName]),
+    EntryArgs = filename:join(["{PAYLOAD_ROOT}", "bin", EscriptName]),
+    % TODO: do not hardcode paths containing erts and apps versions
+    Command = AzdoraPath ++ " "
+        "--launcher " ++ PiadinaPath ++ " "
+        "--payload " ++ filename:join([CassoneDir, EscriptName]) ++ " "
+        "--output " ++ EscriptName ++ ".bin "
+        "--meta APP_NAME=" ++ EscriptName ++ " "
+        "--meta APP_VER=" ++ Version ++ " "
+        "--meta ENTRY_POINT=bin/escript "
+        "--meta ENTRY_ARGS[]=" ++ EntryArgs ++ " "
+        "--meta ENV.ERL_ROOTDIR=\"{PAYLOAD_ROOT}\" "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/escript:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=lib/erl_interface-5.6.1/bin/erl_call:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/run_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/yielding_c_fun:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erlc:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/epmd:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/dialyzer:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erl_call:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/inet_gethost:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/beam.smp:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erlexec:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/to_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erl_child_setup:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/heart:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/dyn_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/ct_run:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/typer:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/escript:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/run_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/erlc:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/dialyzer:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/erl_call:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/to_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/ct_run:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/typer:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=bin/escript:" ++ MUSL ++ " ",
+    rebar_utils:sh(Command, []).
