@@ -1,20 +1,16 @@
 -module(cassone_piadina).
 
--export([fetch/2]).
+-export([fetch_piadina/2, fetch_azdora/2]).
 
 -define(url_template,
 "https://github.com/stritzinger/piadina/releases/download/{V}/{PROG}-{OS}-{ARCH}").
 
--spec fetch(OS :: cassone:os(), Arch :: cassone:arch()) ->
-    {string(), string()}.
-fetch(OS, Arch) ->
-    PiadinaPath = fetch_piadina(OS, Arch),
-    AzdoraPath = fetch_azdora(OS, Arch),
-    {PiadinaPath, AzdoraPath}.
-
+-spec fetch_piadina(OS :: cassone:os(), Arch :: cassone:arch()) -> string().
 fetch_piadina(OS, Arch) ->
     URL = make_url("piadina", OS, Arch),
     cassone_cache:fetch(URL).
+
+-spec fetch_azdora(OS :: cassone:os(), Arch :: cassone:arch()) -> string().
 fetch_azdora(OS, Arch) ->
     URL = make_url("azdora", OS, Arch),
     cassone_cache:fetch(URL).

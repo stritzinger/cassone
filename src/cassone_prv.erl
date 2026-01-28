@@ -35,11 +35,15 @@ do(State) ->
     Config = rebar_state:get(State, cassone, []),
     Mode = get_option(mode, Config, release),
     Targets = get_option(targets, Config, [current_machine]),
+    {HostArch, HostOS} = system_architecture(),
+    AzdoraPath = cassone_piadina:fetch_azdora(HostOS, HostArch),
+
     Opts = #{
         version => Version,
         mode => Mode,
         escript_dir => EscriptDir,
-        cassone_dir => CassoneDir
+        cassone_dir => CassoneDir,
+        azdora_path => AzdoraPath
     },
     {Opts2, State1} = release(Mode, Opts, State),
     [begin
@@ -74,12 +78,12 @@ cleanup_working_dir(#{cassone_dir := CassoneDir, escript_name := EscriptName}) -
     rebar_utils:sh(io_lib:format("rm -rf ~s", [ReleaseDir]), []),
     ok.
 
-assemble_target({OS, Arch}, Options) ->
+assemble_target({OS, Arch}, #{azdora_path := AzdoraPath} = Options) ->
     OtpVersion = otp_version(),
     TargetOTPDir = cassone_erts:fetch(OtpVersion, OS, Arch),
     run_otp_install(TargetOTPDir),
+    PiadinaPath = cassone_piadina:fetch_piadina(OS, Arch),
     MuslcRuntime = cassone_musl:fetch(OS,Arch),
-    {PiadinaPath, AzdoraPath} = cassone_piadina:fetch(OS, Arch),
     rebar_utils:sh("chmod +x " ++ MuslcRuntime, []),
     rebar_utils:sh("chmod +x " ++ AzdoraPath, []),
     rebar_utils:sh("chmod +x " ++ PiadinaPath, []),
@@ -87,7 +91,8 @@ assemble_target({OS, Arch}, Options) ->
     Options2 = copy_target_otp(TargetOTPDir, Options),
     copy_musl_runtime(MuslcRuntime, Options2),
     MuslcRuntimeName = filename:basename(MuslcRuntime),
-    cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, Options2);
+    Options3 = Options2#{target_arch => Arch, target_os => OS},
+    cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, Options3);
 assemble_target(Target, _) ->
     rebar_api:warning("cassone: unsupported target: ~p", [Target]).
 
@@ -155,6 +160,14 @@ otp_version() ->
     {ok, Version} = file:read_file(filename:join([Root, "releases", Major, "OTP_VERSION"])),
     string:trim(binary_to_list(Version)).
 
+-spec system_architecture() -> cassone:arch().
+system_architecture() ->
+    [Arch, _, OS | _] = string:split(erlang:system_info(system_architecture), "-", all),
+    {list_to_existing_atom(Arch), os_to_atom(OS)}.
+
+os_to_atom("linux") -> linux;
+os_to_atom(["darwin", _]) -> macos.
+
 cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, #{mode := escript} = Options) ->
     #{cassone_dir := CassoneDir,
       escript_name := EscriptName,
@@ -167,7 +180,7 @@ cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, #{mode := escript} = Options) ->
     Command = AzdoraPath ++ " "
         "--launcher " ++ PiadinaPath ++ " "
         "--payload " ++ filename:join([CassoneDir, EscriptName]) ++ " "
-        "--output " ++ EscriptName ++ ".bin "
+        "--output " ++ output_bin_name(Options) ++ " "
         "--meta APP_NAME=" ++ EscriptName ++ " "
         "--meta APP_VER=" ++ Version ++ " "
         "--meta ENTRY_POINT=bin/escript "
@@ -200,3 +213,13 @@ cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, #{mode := escript} = Options) ->
         "--meta PATCHELF_SET_INTERPRETER[]=bin/typer:" ++ MUSL ++ " "
         "--meta PATCHELF_SET_INTERPRETER[]=bin/escript:" ++ MUSL ++ " ",
     rebar_utils:sh(Command, []).
+
+output_bin_name(Options) ->
+    #{target_os := OS,
+      target_arch := Arch,
+      escript_name := EscriptName} = Options,
+    EscriptName ++ "-" ++ atom_to_list(OS) ++ "-"
+    ++ arch_to_string(Arch) ++ ".bin".
+
+arch_to_string(x86_64) -> "amd64";
+arch_to_string(aarch64) -> "arm64".
