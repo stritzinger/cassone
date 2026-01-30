@@ -84,10 +84,10 @@ assemble_target({OS, Arch}, Options) ->
     rebar_utils:sh("chmod +x " ++ AzdoraPath, []),
     rebar_utils:sh("chmod +x " ++ PiadinaPath, []),
     copy_released_files(Options),
-    copy_target_otp(TargetOTPDir, Options),
-    copy_musl_runtime(MuslcRuntime, Options),
+    Options2 = copy_target_otp(TargetOTPDir, Options),
+    copy_musl_runtime(MuslcRuntime, Options2),
     MuslcRuntimeName = filename:basename(MuslcRuntime),
-    cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, Options);
+    cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, Options2);
 assemble_target(Target, _) ->
     rebar_api:warning("cassone: unsupported target: ~p", [Target]).
 
@@ -113,10 +113,11 @@ copy_target_otp(TargetOTPDir, #{
     mode := escript,
     cassone_dir := CassoneDir,
     escript_name := EscriptName
-}) ->
+} = Options) ->
     PayloadLocation = filename:join([CassoneDir, EscriptName]),
     rebar_api:info("cassone: copying erts, libs and binaries from ~p to ~p", [TargetOTPDir, PayloadLocation]),
     [ErtsFolder | _] = filelib:wildcard("*/erts-*", TargetOTPDir),
+    [_, ErtsVersion] = string:split(ErtsFolder, "-"),
     ErtsFullPath = filename:join([TargetOTPDir, ErtsFolder]),
     cp_cmd(ErtsFullPath, PayloadLocation),
     [LibFolder | _] = filelib:wildcard("*/lib", TargetOTPDir),
@@ -127,7 +128,8 @@ copy_target_otp(TargetOTPDir, #{
     cp_cmd(BinDir, PayloadLocation),
     % We replace epmd symlink with the real file to avoid an error from tar+gzip.
     rebar_api:info("cassone: removing epmd symlink", []),
-    rebar_utils:sh("rm " ++ filename:join([PayloadLocation, "bin", "epmd"]), []).
+    rebar_utils:sh("rm " ++ filename:join([PayloadLocation, "bin", "epmd"]), []),
+    Options#{erts_version => ErtsVersion}.
 
 copy_musl_runtime(MuslcRuntime, #{
     mode := escript,
@@ -156,7 +158,8 @@ otp_version() ->
 cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, #{mode := escript} = Options) ->
     #{cassone_dir := CassoneDir,
       escript_name := EscriptName,
-      version := Version
+      version := Version,
+      erts_version := ErtsVersion
     } = Options,
     MUSL = filename:join(["{PAYLOAD_ROOT}", MuslcRuntimeName]),
     EntryArgs = filename:join(["{PAYLOAD_ROOT}", "bin", EscriptName]),
@@ -170,24 +173,24 @@ cook(AzdoraPath, PiadinaPath, MuslcRuntimeName, #{mode := escript} = Options) ->
         "--meta ENTRY_POINT=bin/escript "
         "--meta ENTRY_ARGS[]=" ++ EntryArgs ++ " "
         "--meta ENV.ERL_ROOTDIR=\"{PAYLOAD_ROOT}\" "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/escript:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/escript:" ++ MUSL ++ " "
         "--meta PATCHELF_SET_INTERPRETER[]=lib/erl_interface-5.6.1/bin/erl_call:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/run_erl:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/yielding_c_fun:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erlc:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/epmd:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/dialyzer:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erl_call:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/inet_gethost:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/beam.smp:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erlexec:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/to_erl:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/erl_child_setup:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/heart:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/dyn_erl:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/ct_run:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/typer:" ++ MUSL ++ " "
-        "--meta PATCHELF_SET_INTERPRETER[]=erts-16.1.2/bin/escript:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/run_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/yielding_c_fun:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/erlc:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/epmd:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/dialyzer:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/erl_call:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/inet_gethost:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/beam.smp:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/erlexec:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/to_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/erl_child_setup:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/heart:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/dyn_erl:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/ct_run:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/typer:" ++ MUSL ++ " "
+        "--meta PATCHELF_SET_INTERPRETER[]=erts-" ++ ErtsVersion ++ "/bin/escript:" ++ MUSL ++ " "
         "--meta PATCHELF_SET_INTERPRETER[]=bin/run_erl:" ++ MUSL ++ " "
         "--meta PATCHELF_SET_INTERPRETER[]=bin/erlc:" ++ MUSL ++ " "
         "--meta PATCHELF_SET_INTERPRETER[]=bin/dialyzer:" ++ MUSL ++ " "
